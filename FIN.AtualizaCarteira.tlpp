@@ -1,0 +1,581 @@
+#INCLUDE "PROTHEUS.CH"
+#INCLUDE "FWCOMMAND.CH"
+#INCLUDE "TOPCONN.CH" 
+
+namespace FIN
+
+/*/{Protheus.doc} AtualizaCarteira
+    Rotina para gerar o relatório de Securitizadora/Parceiro THCM
+    @type user function
+    @author José Vitor Rodrigues
+    @since 03/11/2025
+    @version 1.0
+/*/
+User Function AtualizaCarteira()
+    Private cAlias    := getNextAlias() as character  
+    Private cFiliaisSel                 as character
+    Private oSay                        as object
+
+    SelecionaFilial()
+
+Return
+
+/*/{Protheus.doc} Executa
+    Função responsável por chamar a execução
+    @type  Static Function
+    @author José Vitor Rodrigues
+    @since 03/11/2025
+    @version 1.0
+/*/
+Static Function Executa(oSay)
+    Private nQuantidade := 0 as numeric
+    oSay:SetText("Definindo as Filiais selecionadas ...")
+    ProcessMessages()
+    if defineFiliais()
+
+        oSay:SetText("Realizando a Consulta ...")
+        ProcessMessages()
+        Consulta()
+
+        oSay:SetText("Realizando o Salvamento dos dados...")
+        ProcessMessages()
+        realizaSalvamento(oSay)
+
+        oDlgMark:end()
+    endif
+
+Return
+
+Return 
+
+/*/{Protheus.doc} Consulta
+    Função para realizar a consulta SQL
+    @type Static Function
+    @author José Vitor Rodrigues
+    @since 03/11/2025
+    @version 1.0
+/*/
+Static Function Consulta()
+    local cQuery := ""
+
+    cQuery += " SELECT                                                       "
+    cQuery += "    SE1.E1_FILIAL                    AS FILIAL,              "
+    cQuery += "    SE1.E1_PREFIXO                   AS PREFIXO,             "
+    cQuery += "    SE1.E1_CLIENTE                   AS COD_CLIENTE,         "
+    cQuery += "    SE1.E1_NUM                       AS NUMERO,              "
+    cQuery += "    SE1.E1_RAZAO                     AS CLIENTE,             "
+    cQuery += "    SE1.E1_PRODUTO                   AS COD_PRODUTO,         "
+
+    //SB1: se não houver correspondência, vazio
+    cQuery += "    CASE WHEN SB1.B1_COD IS NULL THEN '' ELSE SB1.B1_DESC END AS DESCRICAO,"
+
+    cQuery += "    SE1.E1_PARCELA                               AS PARCELA, "
+
+    // Numéricos garantidos (para Excel)
+    cQuery += "    CAST(ISNULL(SE1.E1_VALOR,0)  AS DECIMAL(18,2)) AS VALOR,         "
+    cQuery += "    CAST(ISNULL(SE1.E1_ACRESC,0) AS DECIMAL(18,2)) AS VL_IPCA_IGPM,  "
+
+    //JUROS sempre positivo (ABS)
+    cQuery += "    CAST(                                                                                    "
+    cQuery += "    CASE                                                                                     "
+    cQuery += "        WHEN (NULLIF(LTRIM(RTRIM(SE1.E1_BAIXA)), '') IS NULL OR SE1.E1_BAIXA = '00000000')   "
+    cQuery += "        THEN 0                                                                               "
+    cQuery += "        ELSE ABS(ISNULL(SE1.E1_JUROS, 0) - ISNULL(SE1.E1_ACRESC, 0))                         "
+    cQuery += "    END                                                                                      "
+    cQuery += "    AS DECIMAL(18,2)) AS JUROS,                                                              "
+
+    // *** TROCA DE POSIÇÃO: DESCONTO vem aqui no lugar de VL_PARCELA ***
+    cQuery += "    CAST(ISNULL(SE5_TOTAIS.VLDESCO,0) AS DECIMAL(18,2)) AS DESCONTO,                         "
+
+    // (VL_PARCELA foi movido para a posição onde antes estava o DESCONTO)
+    cQuery += "    CAST(ISNULL(SE1.E1_VALOR,0) + ISNULL(SE1.E1_ACRESC,0) - ISNULL(SE1.E1_DECRESC,0) AS DECIMAL(18,2)) AS VL_PARCELA, "
+
+    // VALOR_RECEBIDO
+    cQuery += "    CASE                                                                                     "
+    cQuery += "        WHEN (NULLIF(LTRIM(RTRIM(SE1.E1_BAIXA)), '') IS NULL OR SE1.E1_BAIXA = '00000000')   "
+    cQuery += "            OR ISNULL(E5X.QTDE, 0) = 0                                                       "
+    cQuery += "            THEN CAST(NULL AS DECIMAL(18,2))                                                 "
+    cQuery += "        ELSE CAST(                                                                           "
+    cQuery += "                ISNULL(SE1.E1_VALOR, 0)                                                      "
+    cQuery += "            + ISNULL(SE5_TOTAIS.JUROS, 0)                                                    "
+    cQuery += "            - ISNULL(SE5_TOTAIS.VLDESCO, 0)                                                  "
+    cQuery += "            AS DECIMAL(18,2))                                                                "
+    cQuery += "    END AS VALOR_RECEBIDO,                                                                   "
+
+    // SALDO_DEVEDOR
+    cQuery += "    CAST(                                                                                        "
+    cQuery += "    CASE                                                                                         "
+    cQuery += "        WHEN (NULLIF(LTRIM(RTRIM(SE1.E1_BAIXA)), '') IS NOT NULL AND SE1.E1_BAIXA <> '00000000') "
+    cQuery += "        THEN 0                                                                                   "
+    cQuery += "        ELSE ISNULL(SE1.E1_SALDO, 0)                                                             "
+    cQuery += "    END                                                                                          "
+    cQuery += "    AS DECIMAL(18,2)) AS SALDO_DEVEDOR,                                                          "
+
+    // Datas
+    cQuery += "    CASE WHEN SE1.E1_BAIXA   IN ('','00000000') THEN CAST(NULL AS date)                              "
+    cQuery += "        ELSE CONVERT(date, SE1.E1_BAIXA,   112) END AS DT_BAIXA,                                     "
+    cQuery += "    CASE WHEN SE1.E1_EMISSAO IN ('','00000000') THEN CAST(NULL AS date)                              "
+    cQuery += "        ELSE CONVERT(date, SE1.E1_EMISSAO, 112) END AS DT_EMISSAO,                                   "
+    cQuery += "    CASE WHEN SE1.E1_VENCREA IN ('','00000000') THEN CAST(NULL AS date)                              "
+    cQuery += "        ELSE CONVERT(date, SE1.E1_VENCREA, 112) END AS DT_VENCTO,                                    "
+    cQuery += "    CASE WHEN ZZC.ZZC_DTANOT IS NULL OR ZZC.ZZC_DTANOT IN ('','00000000') THEN CAST(NULL AS date)    "
+    cQuery += "        ELSE CONVERT(date, ZZC.ZZC_DTANOT, 112) END AS DTA_ENVIONOTIF,                               "
+    cQuery += "    CASE WHEN ZZC.ZZC_REGIST IS NULL OR ZZC.ZZC_REGIST IN ('','00000000') THEN CAST(NULL AS date)    "
+    cQuery += "        ELSE CONVERT(date, ZZC.ZZC_REGIST, 112) END AS DTA_REGISTRO,                                 "
+    cQuery += "    CASE WHEN ZZC.ZZC_NOTIFI IS NULL OR ZZC.ZZC_NOTIFI IN ('','00000000') THEN CAST(NULL AS date)    "
+    cQuery += "        ELSE CONVERT(date, ZZC.ZZC_NOTIFI, 112) END AS DTA_NOTIFICACAO,                              "
+    cQuery += "    CASE WHEN SE1.E1_ZZSERAS IN ('','00000000') THEN CAST(NULL AS date)                              "
+    cQuery += "        ELSE CONVERT(date, SE1.E1_ZZSERAS, 112) END AS SERASA,                                       "
+    cQuery += "    CASE WHEN SE1.E1_ZZINTIM IN ('','00000000') THEN CAST(NULL AS date)                              "
+    cQuery += "        ELSE CONVERT(date, SE1.E1_ZZINTIM, 112) END AS DTA_INTIMACAO,                                "
+
+    // Demais campos
+    cQuery += "    SE1.E1_ZZSECUR          AS SECURITIZADORA,                                                       "
+    cQuery += "    SE1.E1_ZZPARCE          AS PARCEIRO,                                                             "
+    cQuery += "    SE1.E1_PORTADO          AS BANCO,                                                                "
+    cQuery += "    SE1.E1_AGEDEP           AS AGENCIA,                                                              "
+    cQuery += "    SE1.E1_CONTA            AS CONTA,                                                                "
+    cQuery += "    SE1.E1_ZZCDEMP,                                                                                  "
+
+    cQuery += "    CASE SE1.E1_ZZINDIC WHEN '1' THEN 'IPCA' WHEN '2' THEN 'IGP-M'                                                               "
+    cQuery += "        WHEN '3' THEN 'INCC' WHEN '4' THEN 'Fixa' ELSE 'VAZIO' END AS INDICE,                                                    "
+    cQuery += "    CASE SE1.E1_FIXVAR WHEN 'F' THEN 'FIXA' WHEN 'V' THEN 'VARIAVEL' ELSE 'VAZIO' END AS FIXA_VARIAVEL,                          "
+    cQuery += "    CASE SE1.E1_TIPIGPM WHEN 'F' THEN 'FIXA' WHEN 'M' THEN 'MENSAL' WHEN 'A' THEN 'ANUAL' ELSE 'VAZIO' END AS TIPO_INDICE,       "
+    cQuery += "    CASE SE1.E1_CVAF WHEN 'A' THEN 'ALIENCAO FIDUCIARIA' WHEN 'C' THEN 'COMPRA E VENDA' ELSE 'VAZIO' END AS TIPOCONTRATO,        "
+    cQuery += "    CASE SE1.E1_ZZINCSE WHEN 'S' THEN 'SIM' WHEN 'N' THEN 'NAO' ELSE 'SIM' END AS INCLUI_SERASA,                                 "
+    cQuery += "    CASE SE1.E1_ZZRETSE WHEN 'S' THEN 'SIM' WHEN 'N' THEN 'NAO' ELSE 'SIM' END AS RETIRA_SERASA,                                 "
+
+    // ZZC
+    cQuery += "    CASE WHEN ZZC.ZZC_CLIENT IS NULL THEN ''                                                        "
+    cQuery += "        WHEN ISNULL(LTRIM(RTRIM(ZZC.ZZC_LEILAO)), '') = '' THEN 'NAO' ELSE 'SIM' END AS LEILAO,     "
+
+    // ZB2
+    cQuery += "    CASE ZB2.ZB2_SITUAC                                                                          "
+    cQuery += "        WHEN '1'  THEN 'COBRANCA' WHEN '2'  THEN 'JUR/SUBJ'  WHEN '3'  THEN 'CUSTAS'             "
+    cQuery += "        WHEN '4'  THEN 'NOT. DISTRATO' WHEN '5' THEN 'REGISTRO' WHEN '6' THEN 'INTIMACAO'        "
+    cQuery += "        WHEN '7'  THEN 'ANISTIA' WHEN '8'  THEN 'DISTRATO' WHEN '9'  THEN 'RESCISAO'             "
+    cQuery += "        WHEN '10' THEN 'ADITAMENTO' WHEN '11' THEN 'LEILAO' WHEN '12' THEN 'CONCLUIDO'           "
+    cQuery += "        ELSE '' END AS SIT_COBRANCA,                                                             "
+
+    // SE5_LAST
+    cQuery += "    CASE                                                                                                             "
+    cQuery += "        WHEN NULLIF(LTRIM(RTRIM(SE1.E1_BAIXA)), '') IS NULL OR SE1.E1_BAIXA = '00000000' OR ISNULL(E5X.QTDE,0)=0     "
+    cQuery += "            THEN ''                                                                                                  "
+    cQuery += "        ELSE ISNULL(SE5_LAST.E5_MOTBX, '')                                                                           "
+    cQuery += "    END AS E5_MOTBX                                                                                                  "
+
+    cQuery += " FROM SE1020 AS SE1 WITH (NOLOCK)                                                                                    "
+    cQuery += " LEFT JOIN SB1020 AS SB1 WITH (NOLOCK)                                                                               "
+    cQuery += "    ON SB1.D_E_L_E_T_ = ''                                                                                           "
+    cQuery += "    AND SB1.B1_COD     = SE1.E1_PRODUTO                                                                              "
+    cQuery += "    AND (SB1.B1_FILIAL = SE1.E1_FILIAL OR SB1.B1_FILIAL = '' OR SB1.B1_FILIAL IS NULL)                               "
+    cQuery += " LEFT JOIN ZZC020 AS ZZC WITH (NOLOCK)                                                                               "
+    cQuery += "    ON ZZC.D_E_L_E_T_ = ''                                                                                           "
+    cQuery += "    AND ZZC.ZZC_FILIAL = SE1.E1_FILIAL                                                                               "
+    cQuery += "    AND ZZC.ZZC_CLIENT = SE1.E1_CLIENTE                                                                              "
+    cQuery += "    AND ZZC.ZZC_PRODUT = SE1.E1_PRODUTO                                                                              "
+
+    // ZB2 mais recente por cliente/produto
+    cQuery += " OUTER APPLY (                               "
+    cQuery += "     SELECT TOP (1) ZB2.ZB2_SITUAC           "
+    cQuery += "     FROM ZB2020 AS ZB2 WITH (NOLOCK)        "
+    cQuery += "     WHERE ZB2.D_E_L_E_T_ = ''               "
+    cQuery += "     AND ZB2.ZB2_CODCLI = SE1.E1_CLIENTE     "
+    cQuery += "     AND ZB2.ZB2_PRODUT = SE1.E1_PRODUTO     "
+    cQuery += "     ORDER BY ZB2.R_E_C_N_O_ DESC            "
+    cQuery += " ) AS ZB2                                    "
+
+    // ÚLTIMO motivo da SE5 (TOP 1)
+    cQuery += " OUTER APPLY (                                               "
+    cQuery += "     SELECT TOP (1) LTRIM(RTRIM(E5.E5_MOTBX)) AS E5_MOTBX    "
+    cQuery += "     FROM SE5020 AS E5 WITH (NOLOCK)                         "
+    cQuery += "     WHERE E5.D_E_L_E_T_ = ''                                "
+    cQuery += "     AND E5.E5_FILIAL  = SE1.E1_FILIAL                       "
+    cQuery += "     AND E5.E5_CLIFOR  = SE1.E1_CLIENTE                      "
+    cQuery += "     AND E5.E5_PREFIXO = SE1.E1_PREFIXO                      "
+    cQuery += "     AND E5.E5_NUMERO  = SE1.E1_NUM                          "
+    cQuery += "     AND E5.E5_PARCELA = SE1.E1_PARCELA                      "
+    cQuery += "     AND LTRIM(RTRIM(E5.E5_MOTBX)) <> ''                     " 
+    cQuery += "     ORDER BY E5.R_E_C_N_O_ DESC                             "
+    cQuery += " ) AS SE5_LAST                                               "
+
+    // TODOS os motivos (distinct) concatenados + contagem
+    cQuery += " OUTER APPLY (                                                           "
+    cQuery += "     SELECT                                                              "
+    cQuery += "         STUFF((                                                         "
+    cQuery += "             SELECT ' | ' + E5d.E5_MOTBX                                 "
+    cQuery += "             FROM (                                                      "
+    cQuery += "                 SELECT DISTINCT LTRIM(RTRIM(E5.E5_MOTBX)) AS E5_MOTBX   "
+    cQuery += "                 FROM SE5020 AS E5 WITH (NOLOCK)                         "
+    cQuery += "                 WHERE E5.D_E_L_E_T_ = ''                                "
+    cQuery += "                 AND E5.E5_FILIAL  = SE1.E1_FILIAL                       "
+    cQuery += "                 AND E5.E5_CLIFOR  = SE1.E1_CLIENTE                      "
+    cQuery += "                 AND E5.E5_PREFIXO = SE1.E1_PREFIXO                      "
+    cQuery += "                 AND E5.E5_NUMERO  = SE1.E1_NUM                          "
+    cQuery += "                 AND E5.E5_PARCELA = SE1.E1_PARCELA                      "
+    cQuery += "                 AND LTRIM(RTRIM(E5.E5_MOTBX)) <> ''                     "
+    cQuery += "             ) AS E5d                                                    "
+    cQuery += "             FOR XML PATH(''), TYPE                                      "
+    cQuery += "         ).value('.', 'nvarchar(max)'), 1, 3, '') AS MOTIVOS,            "
+    cQuery += "         (SELECT COUNT(*)                                                "
+    cQuery += "         FROM SE5020 AS E5 WITH (NOLOCK)                                 "
+    cQuery += "         WHERE E5.D_E_L_E_T_ = ''                                        "
+    cQuery += "         AND E5.E5_FILIAL  = SE1.E1_FILIAL                               "
+    cQuery += "         AND E5.E5_CLIFOR  = SE1.E1_CLIENTE                              "
+    cQuery += "         AND E5.E5_PREFIXO = SE1.E1_PREFIXO                              "
+    cQuery += "         AND E5.E5_NUMERO  = SE1.E1_NUM                                  "
+    cQuery += "         AND E5.E5_PARCELA = SE1.E1_PARCELA                              "
+    cQuery += "         ) AS QTDE                                                       "
+    cQuery += " ) AS E5X                                                                "
+
+    // TOTAIS DE VALOR/JUROS/DESCONTO NA SE5020 (mesma chave)
+    cQuery += " OUTER APPLY (                                                                                   "
+    cQuery += "     SELECT                                                                                      "
+    cQuery += "         SUM(CASE WHEN E5.E5_TIPODOC = 'VL' THEN ISNULL(E5.E5_VALOR,0) ELSE 0 END) AS VALOR,     "
+    cQuery += "         SUM(CASE WHEN E5.E5_TIPODOC = 'JR' THEN ISNULL(E5.E5_VALOR,0) ELSE 0 END) AS JUROS,     "
+    cQuery += "         SUM(ISNULL(E5.E5_VLDESCO,0)) AS VLDESCO                                                 "
+    cQuery += "     FROM SE5020 AS E5 WITH (NOLOCK)                                                             "
+    cQuery += "     WHERE E5.D_E_L_E_T_ = ''                                                                    "
+    cQuery += "     AND E5.E5_FILIAL  = SE1.E1_FILIAL                                                           "
+    cQuery += "     AND E5.E5_CLIFOR  = SE1.E1_CLIENTE                                                          "
+    cQuery += "     AND E5.E5_PREFIXO = SE1.E1_PREFIXO                                                          "
+    cQuery += "     AND E5.E5_NUMERO  = SE1.E1_NUM                                                              "
+    cQuery += "     AND E5.E5_PARCELA = SE1.E1_PARCELA                                                          "
+    cQuery += " ) AS SE5_TOTAIS                                                                                 "
+
+    cQuery += " WHERE SE1.D_E_L_E_T_ = ''                                                                       "
+    cQuery += " AND SB1.B1_LOTEAM <> ''                                                                         "
+    cQuery += " AND SE1.E1_FILIAL IN ("+cFiliaisSel+")"
+    cQuery += " AND SE1.E1_PREFIXO NOT IN ('ZZZ','HST')                                                         "
+
+    // Exclui contrato inteiro se houver qualquer RES ou DIST em qualquer parcela (case-insensitive)
+    cQuery += " AND NOT EXISTS (                                                                                "
+    cQuery += "         SELECT 1                                                                                "
+    cQuery += "         FROM SE5020 AS E5 WITH (NOLOCK)                                                         "
+    cQuery += "         WHERE E5.D_E_L_E_T_ = ''                                                                "
+    cQuery += "         AND E5.E5_FILIAL  = SE1.E1_FILIAL                                                       "
+    cQuery += "         AND E5.E5_PREFIXO = SE1.E1_PREFIXO                                                      "
+    cQuery += "         AND E5.E5_NUMERO  = SE1.E1_NUM                                                          "
+    cQuery += "         AND UPPER(LTRIM(RTRIM(E5.E5_MOTBX))) IN ('RES','DIST')                                  "
+    cQuery += " )                                                                                               "
+
+    cQuery += " ORDER BY                                                                                        "
+    cQuery += "     SE1.E1_FILIAL,                                                                              "
+    cQuery += "     SE1.E1_PREFIXO,                                                                             "
+    cQuery += "     SE1.E1_NUM,                                                                                 "
+    cQuery += "     SE1.E1_CLIENTE,                                                                             "
+    cQuery += "     CASE WHEN SE1.E1_PARCELA LIKE 'E%' THEN 0 ELSE 1 END,                                       "
+    cQuery += "     CASE WHEN SE1.E1_PARCELA NOT LIKE 'E%' THEN TRY_CONVERT(int, SE1.E1_PARCELA) END,           "
+    cQuery += "     SE1.E1_PARCELA;                                                                             "
+
+    TCQUERY cQuery New Alias (cAlias)
+
+    DbSelectArea(cAlias)
+    Count to nQuantidade
+Return 
+
+/*/{Protheus.doc} realizaSalvamento
+    (long_description)
+    @type  Static Function
+    @author José Vitor Rodrigues
+    @since 04/11/2025
+    @version version
+    @param param_name, param_type, param_descr
+    @return return_var, return_type, return_description
+    @example
+    (examples)
+    @see (links_or_references)
+/*/
+Static Function realizaSalvamento(oSay)
+    Local nContador := 0                        as numeric
+    Local nVersao := 0                          as numeric
+    Local cValAtual                             as character
+    Local cTotal := cValtoChar(nQuantidade)     as character
+    Local cFilialAt := ""                       as character
+    Local dDate := dDataBase                    as date
+
+    dbSelectArea(cAlias)
+    DBGoTop()
+
+    DbSelectArea("ZA5")
+
+    While (cAlias)->(!EOF())
+        if (nContador == 0)
+            realizaDeletacao()
+        endif
+
+        nContador++
+        
+        if ((cAlias)->FILIAL != cFilialAt)
+            nVersao := retornaVersao((cAlias)->FILIAL)
+            cFilialAt := (cAlias)->FILIAL
+        endif
+
+        if( Reclock("ZA5", .T.))
+            ZA5->ZA5_FILIAL := (cAlias)->FILIAL
+            ZA5->ZA5_PREFIX := (cAlias)->PREFIXO
+            ZA5->ZA5_NUMERO := (cAlias)->NUMERO
+            ZA5->ZA5_CODCLI := (cAlias)->COD_CLIENTE
+            ZA5->ZA5_NOMCLI := (cAlias)->CLIENTE
+            ZA5->ZA5_CODPRO := (cAlias)->COD_PRODUTO
+            ZA5->ZA5_NOMPRO := (cAlias)->DESCRICAO
+            ZA5->ZA5_PARCEL := (cAlias)->PARCELA
+            ZA5->ZA5_VALOR  := (cAlias)->VALOR
+            ZA5->ZA5_VLINDX := (cAlias)->VL_IPCA_IGPM
+            ZA5->ZA5_JUROS  := (cAlias)->JUROS
+            ZA5->ZA5_DESCNT := (cAlias)->DESCONTO
+            ZA5->ZA5_VLPARC := (cAlias)->VL_PARCELA
+            ZA5->ZA5_VLRECB := (cAlias)->VALOR_RECEBIDO
+            ZA5->ZA5_SALDO  := (cAlias)->SALDO_DEVEDOR
+            ZA5->ZA5_DTBX   := (cAlias)->DT_BAIXA
+            ZA5->ZA5_DTEMIS := (cAlias)->DT_EMISSAO
+            ZA5->ZA5_DTVENC := (cAlias)->DT_VENCTO
+            ZA5->ZA5_DTENOT := (cAlias)->DTA_ENVIONOTIF
+            ZA5->ZA5_DTREGI := (cAlias)->DTA_REGISTRO
+            ZA5->ZA5_DTNOTI := (cAlias)->DTA_NOTIFICACAO
+            ZA5->ZA5_SERASA := (cAlias)->SERASA
+            ZA5->ZA5_DTINTI := (cAlias)->DTA_INTIMACAO
+            ZA5->ZA5_SECURI := (cAlias)->SECURITIZADORA
+            ZA5->ZA5_PARCE  := (cAlias)->PARCEIRO
+            ZA5->ZA5_BANCO  := (cAlias)->BANCO
+            ZA5->ZA5_AGENCI := (cAlias)->AGENCIA
+            ZA5->ZA5_CONTA  := (cAlias)->CONTA
+            ZA5->ZA5_ZZCEMP := (cAlias)->E1_ZZCDEMP
+            ZA5->ZA5_INDICE := (cAlias)->INDICE
+            ZA5->ZA5_FIXVAR := (cAlias)->FIXA_VARIAVEL
+            ZA5->ZA5_TPINDI := (cAlias)->TIPO_INDICE
+            ZA5->ZA5_TPCONT := (cAlias)->TIPOCONTRATO
+            ZA5->ZA5_INCSER := (cAlias)->INCLUI_SERASA
+            ZA5->ZA5_RETSER := (cAlias)->RETIRA_SERASA
+            ZA5->ZA5_LEILAO := (cAlias)->LEILAO
+            ZA5->ZA5_SITCOB := (cAlias)->SIT_COBRANCA
+            ZA5->ZA5_MOTBX  := (cAlias)->E5_MOTBX
+            ZA5->ZA5_DTEXEC := dDate
+            ZA5->ZA5_VERSAO := nVersao
+            ZA5->(MsUnlock())
+        endif
+        cValAtual := cValtoChar(nContador)
+        oSay:SetText("Salvando "+cValAtual+" de "+cTotal)
+        ProcessMessages()
+        (cAlias)->(DBSkip())
+    End
+Return 
+
+/*/{Protheus.doc} realizaDeletacao
+    Função para realizar a Deletação dos dados anteriores a dois anos
+    @type  Static Function
+    @author José Vitor Rodrigues
+    @since 04/11/2025
+    @version 1.0
+/*/
+Static Function realizaDeletacao()
+    Local dDataAtual    := dDataBase
+    Local dDataAnterior := YearSub(dDataAtual, 2)
+    Local cDataAnterior := DtoS(dDataAnterior)
+    Local cDataLeft     := Left(cDataAnterior,6)
+    Local cAliasDelete  := GetNextAlias()
+
+    DbSelectArea("ZA5")
+    DbSetOrder(1)
+    BeginSql Alias cAliasDelete       
+        SELECT 
+            ZA5_FILIAL,
+            ZA5_PREFIX,
+            ZA5_NUMERO,
+            ZA5_PARCEL,
+            ZA5_CODCLI,
+            ZA5_DTEXEC,
+            ZA5_VERSAO
+        FROM 
+            %table:ZA5% ZA5
+        WHERE 
+            LEFT(ZA5_DTEXEC,6) = %exp:cDataLeft%
+            AND ZA5.%notDel%
+    EndSql
+
+    while (cAliasDelete)->(!EOF())
+        if( ZA5->(MsSeek((cAliasDelete)->ZA5_FILIAL+(cAliasDelete)->ZA5_PREFIX+(cAliasDelete)->ZA5_NUMERO+(cAliasDelete)->ZA5_PARCEL+(cAliasDelete)->ZA5_CODCLI+(cAliasDelete)->ZA5_DTEXEC+cValtoChar((cAliasDelete)->ZA5_VERSAO))))
+           RecLock('ZA5', .F.)
+                DbDelete()
+            ZA5->(MsUnlock())
+        endif    
+        (cAliasDelete)->(DbSKip())
+    end
+    
+Return 
+
+/*/{Protheus.doc} retornaVersao
+    Função para retornar a versão que será salvo
+    @type  Static Function
+    @author José Vitor Rodrigues
+    @since 04/11/2025
+    @version 1
+/*/
+Static Function retornaVersao(cFilialAtual)
+    local cAliasVersao := GetNextAlias() as character
+    Local nVersao := 1 as numeric
+
+    BEGINSQL ALIAS cAliasVersao
+        SELECT 
+            MAX(ZA5.ZA5_VERSAO)    AS VERSAO
+        FROM 
+            %table:ZA5% ZA5
+        WHERE 
+            ZA5.ZA5_FILIAL = %exp:cFilialAtual%
+            AND ZA5.%notdel%
+    ENDSQL
+
+    if (cAliasVersao)->(!EOF())
+        nVersao := (cAliasVersao)->VERSAO + 1
+    endif
+
+Return nVersao
+
+/*/{Protheus.doc} SelecionaFilial
+    Função para selecionar as filiais a serem consultadas
+    @type  Static Function
+    @author José Vitor Rodrigues
+    @since 04/11/2025
+    @version 1.0
+/*/
+Static Function SelecionaFilial()
+    Local aArea         := GetArea()
+    Local aCampos := {}
+    Local oTTable := Nil
+    Local aColunas := {}
+    local nX
+    //Janela e componentes
+    Private oDlgMark
+    Private oPanGrid
+    Private oMaBrowse
+    Private cAlTmp := GetNextAlias()
+    //Tamanho da janela
+    Private aTamanho := MsAdvSize()
+    Private nJanLarg := aTamanho[5]
+    Private nJanAltu := aTamanho[6]
+
+    //Adiciona as colunas que serão criadas na temporária
+    aAdd(aCampos, { 'CODIGO', 'C', 2, 0,''}) //Código
+    aAdd(aCampos, { 'FILIAL', 'C', 6, 0,''}) //Filial
+    aAdd(aCampos, { 'NOME', 'C', 50, 0,''}) //Nome
+    aAdd(aCampos, { 'CNPJ', 'C', 14, 0,''}) //CNPJ
+    aAdd(aCampos, { 'OK', 'C', 2, 0,''}) //Flag para marcação
+
+    //Cria a tabela temporária
+    oTTable:= FWTemporaryTable():New(cAlTmp)
+    oTTable:SetFields( aCampos )
+    oTTable:Create()  
+
+    Popula()
+    //Percorrendo todos os campos da estrutura e adicionando na aColuna
+    For nX := 1 To Len(aCampos)-1    
+        AAdd(aColunas,FWBrwColumn():New())
+        aColunas[Len(aColunas)]:SetData( &("{||"+aCampos[nX][1]+"}") )
+        aColunas[Len(aColunas)]:SetTitle(aCampos[nX][1])
+        aColunas[Len(aColunas)]:SetSize(aCampos[nX][3])
+        aColunas[Len(aColunas)]:SetDecimal(aCampos[nX][4])              
+    Next nX 
+
+    DEFINE MSDIALOG oDlgMark TITLE 'SELECIONE UMA FILIAL' FROM 000, 000  TO 600, 800 COLORS 0, 16777215 PIXEL
+        //Dados
+        oPanGrid := tPanel():New(001, 001, '', oDlgMark, , , , RGB(000,000,000), RGB(254,254,254), (800/2)-1,     (600/2 - 1))
+        oMaBrowse:= FWMarkBrowse():New()
+        oMaBrowse:SetDescription("SELEÇÃO DE FILIAL") //Titulo da Janela
+        oMaBrowse:SetAlias(cAlTmp)
+        oMaBrowse:AddButton("Confirma",{|| FWMsgRun(, {|oSay| Executa(oSay) }, "Processando", "Processando dados")} ,,3,,.F.)
+        oMaBrowse:AddButton("Selecionar Tudo", {||oMaBrowse:AllMark()},,4,,.F.)
+        oMaBrowse:SetTemporary(.T.) //Indica que o Browse utiliza tabela temporária
+        oMaBrowse:SetFieldMark('OK')
+        oMaBrowse:SetOwner(oPanGrid)
+        oMaBrowse:SetColumns(aColunas)
+        oMaBrowse:Activate()
+
+    ACTIVATE MsDialog oDlgMark CENTERED
+    
+    RestArea(aArea)  
+    
+Return 
+
+/*/{Protheus.doc} defineFiliais
+    Função para definir as filiais a serem utilizadas na rotina de geração de Securitizadora/Parceiro
+    Esta função é chamada para popular a tabela temporária com as filiais de Securitizadora ou Parceiro
+    dependendo do tipo selecionado pelo usuário.
+    @type Static Function
+    @author josé Vitor Rodrigues
+    @since 04/11/2025
+    @version 1.0
+/*/
+Static Function defineFiliais()
+    local cMarca := oMaBrowse:Mark() as character
+    local nQuant := 0 as numeric
+    dbSelectArea(cAlTmp)
+    (cAlTmp)->(DBGoTop())
+
+    if !(cAlTmp)->(EOF())
+        While (cAlTmp)->(!EOF())
+            if oMaBrowse:IsMark(cMarca)
+                if nQuant == 0
+                    cFiliaisSel += "'" + (cAlTmp)->FILIAL + "'"
+                else
+                    cFiliaisSel += ",'" + (cAlTmp)->FILIAL + "'"
+                endif
+                nQuant++
+            ENDIF
+            (cAlTmp)->(DBSkip())
+        EndDo
+    ENDIF
+
+    if nQuant == 0
+        FWMsgInfo("Nenhuma filial foi selecionada. A rotina será encerrada.")
+        return .F.
+    endif
+
+Return .T.
+
+/*/{Protheus.doc} Popula
+    Função para popular a tabela temporária com as filiais de Securitizadora/Parceiro
+    @type Static Function
+    @author José Vitor Rodrigues
+    @since 04/11/2025
+    @version 1.0
+/*/
+Static Function Popula()
+    dbSelectArea("SM0")
+    dbSetOrder(1)
+    SM0->(dbGoTop())
+
+    While SM0->(!EOF())
+        If SM0->M0_CODIGO == '02'
+
+            if Select("cQryFil")>0
+
+                cQryFil->(dbCloseArea())
+
+            EndIf
+
+            BeginSql Alias "cQryFil"
+
+                SELECT ZA2_FILIAL FROM %table:ZA2% ZA2
+                WHERE ZA2_FILIAL = %Exp:SM0->M0_CODFIL%
+                AND ZA2.%notDel%
+                GROUP BY ZA2_FILIAL
+                
+            EndSql
+            
+            While cQryFil->(!EOF())
+
+                RecLock(cAlTmp, .T.)
+                    (cAlTmp)->OK := Space(2)
+                    (cAlTmp)->CODIGO := SM0->M0_CODIGO
+                    (cAlTmp)->FILIAL := SM0->M0_CODFIL
+                    (cAlTmp)->NOME   := SM0->M0_NOMECOM
+                (cAlTmp)->(MsUnlock())
+
+                cQryFil->(dbSkip())
+
+            EndDo
+
+        Endif
+        SM0->(dbSkip())
+    Enddo
+Return 
