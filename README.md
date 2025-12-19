@@ -3,7 +3,39 @@
 ## 📌 1. Objetivo
 Esta rotina consolida os dados da carteira financeira (títulos, contratos e indicadores de cobrança) em uma tabela histórica denominada ZA5. O objetivo é servir como fonte de dados otimizada para ferramentas de BI (Power BI, Tableau, etc), permitindo análises de time-series através do controle de versões e datas de execução.
 
-## 💾 2. Dicionário de Dados (Estrutura ZA5)
+## ✏️ 2. Rotina
+
+### Autor: José Vitor Rodrigues
+### Data: 03/11/2025
+### Linguagem: tlpp (protheus)
+
+O código está estruturado em blocos funcionais que garantem desde a interface com o usuário até a performance na extração de dados.
+
+### I. Interface e Seleção (SelecionaFilial / defineFiliais)
+Interface: Utiliza a classe FWMarkBrowse com uma tabela temporária (FWTemporaryTable) para exibir as filiais disponíveis (origem SM0 cruzada com ZA2).
+Interação: O usuário marca as filiais desejadas. A função defineFiliais converte essas marcações em uma string formatada para a cláusula IN do SQL.
+
+### II. Inteligência da Extração (Consulta)
+A extração é realizada via Embedded SQL (TCQUERY) para máxima performance. Pontos de destaque da Query:
+Joins Complexos: Cruza SE1 (Títulos) com SB1 (Produtos), ZZC (Notificações), ZB2 (Situação de Cobrança) e SE5 (Baixas).
+Outer Apply: Utilizado para buscar de forma performática:
+   O último motivo de baixa da SE5.
+   A última situação de cobrança da ZB2.
+   Somas de valores recebidos, juros e descontos diretamente no banco de dados.
+Tratamento de Dados: 
+   Converte datas do Protheus (YYYYMMDD) para o tipo Date do SQL.
+   Trata campos nulos e vazios com ISNULL e CASE WHEN.
+   Filtra títulos que possuem motivos de baixa específicos como 'RES' ou 'DIST' (Rescisão/Distrato) para evitar dados inconsistentes no BI.
+
+### III. Gestão de Histórico e Versão (realizaSalvamento / retornaVersao)
+Versionamento: A função retornaVersao busca o maior número de versão já existente para a filial e incrementa +1, garantindo que cada carga seja única.
+Gravação: Percorre o resultado da consulta e utiliza RecLock para inserir os registros na ZA5.
+Feedback: Exibe uma régua de processamento para o usuário informando "Salvando X de Y".
+
+### IV. Manutenção de Dados (realizaDeletacao)
+A rotina possui uma regra de limpeza automática: ela busca registros na ZA5 que foram executados há exatamente 2 anos (baseado no mês/ano) e realiza a exclusão física (DbDelete) para evitar o crescimento infinito da base de dados.
+
+## 💾 3. Dicionário de Dados (Estrutura ZA5)
 | Campo | Título | Tipo | Tam | Descrição |
 | :--- | :--- | :--- | :--- | :--- |
 | **ZA5_FILIAL** | Filial | Caractere | 6 | Filial do Sistema |
@@ -47,17 +79,3 @@ Esta rotina consolida os dados da carteira financeira (títulos, contratos e ind
 | **ZA5_SECURI** | Secur | Caractere | 6 | Identificador da Securitizadora |
 | **ZA5_PARCE** | Parceiro | Caractere | 6 | Código do Parceiro de Negócio |
 
----
-
-## ⚙️ 3. Fluxo de Processamento
-
-1.  **Versionamento:**
-    * A cada execução bem-sucedida, o sistema incrementa o campo `ZA5_VERSAO`.
-    * Caso a rotina seja executada mais de uma vez na mesma data, o sistema mantém a versão anterior e cria uma nova versão para a filial selecionada.
-2.  **Lógica de Carga:**
-    * Olha a ZB2 mais recente por cliente e retorna a situação
-    * Olha a SE5 e obtem o ultimo motivo de baixa.
-    * Concatena na sequencia todos os motivos de baixa
-    * TOTAIS DE VALOR/JUROS/DESCONTO NA SE5020 (mesma chave)
-    * Exclui contrato inteiro se houver qualquer RES ou DIST em qualquer parcela (case-insensitive)
-  
